@@ -1,3 +1,4 @@
 # watch out for those pesky .DS_Store & binary files
 data
 python/data
+.vscode

@@ -7,8 +7,8 @@ from torchvision import datasets, transforms
 import numpy as np
 import time
 
-batch_size = 128
-learning_rate = 3e-3
+batch_size = 64
+learning_rate = 5e-3
 num_epochs = 5
 
 torch.set_float32_matmul_precision('high')
@@ -46,6 +46,7 @@ print('Test Data Type:', test_data.dtype)
 iters_per_epoch = 60_000 // batch_size
 print('Iters per epoch:', iters_per_epoch)
 
+
 class CNNBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
         super(CNNBlock, self).__init__()
@@ -56,9 +57,13 @@ class CNNBlock(nn.Module):
 
     def forward(self, x):
         x = self.conv(x)
+        # print("conv", x.shape)
         x = self.batchnorm(x)
+        # print("bn", x.shape)
         x = self.relu(x)
+        # print("relu", x.shape)
         x = self.maxpool(x)
+        # print("maxpool", x.shape)
         return x
     
 class MLPBlock(nn.Module):
@@ -85,21 +90,24 @@ class CombinedModel(nn.Module):
         # 64*7*7 is the number of features after flattening w/ 64 output channels, 7x7 spatial dimensions
         # 32*14*14 is the number of features after flattening w/ 32 output channels, 14x14 spatial dimensions
         self.mlp_block1 = MLPBlock(out_channels * 14 * 14, 128, num_classes)
-        self.log_sm_out = nn.LogSoftmax(dim=1)
+        # self.log_sm_out = nn.LogSoftmax(dim=1)
+        # self.sm_out = nn.Softmax(dim=1)
+        self.dropout = nn.Dropout(p=0.5)
 
     def forward(self, x):
         x = self.cnn_block1(x)
         # x = self.cnn_block2(x)
         # Forward through more CNN blocks if defined
         x = self.flatten(x)
-        x = self.mlp_block1(x)
-        logits = self.log_sm_out(x)
+        logits = self.mlp_block1(x)
+        # logits = self.sm_out(x)
         return logits
     
 model = CombinedModel(input_channels=1, num_classes=10).to('cuda')
 # model = torch.compile(model)
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+optimizer = optim.SGD(model.parameters(), lr=learning_rate)
+
 
 # Training the model
 def train(model, criterion, optimizer, epoch):
@@ -118,8 +126,8 @@ def train(model, criterion, optimizer, epoch):
         optimizer.step()
         end = time.time()
         running_loss += loss.item()
-        if i % 100 == 99:
-            print(f'Epoch: {epoch+1}, Iter: {i+1}')
+        if i % 100 == 99 or i == 0:
+            print(f'Epoch: {epoch+1}, Iter: {i+1}, Loss: {loss}')
             print(f'Iteration Time: {(end - start) * 1e3:.4f} sec')
             running_loss = 0.0
 
@@ -149,8 +157,9 @@ def evaluate(model, test_data, test_labels):
     print(f'Average Batch Accuracy: {avg_batch_accuracy * 100:.2f}%')
 
 # Main
-for epoch in range(num_epochs):
+for epoch in range(10):
     train(model, criterion, optimizer, epoch)
     evaluate(model, test_data, test_labels)
     
 print('Finished Training')
+
