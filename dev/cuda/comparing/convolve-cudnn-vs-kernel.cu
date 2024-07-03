@@ -1,3 +1,4 @@
+// compare outputs from CPU, custom kernel and cuDNN
 #include <iostream>
 #include <cudnn.h>
 #include <cuda_runtime.h>

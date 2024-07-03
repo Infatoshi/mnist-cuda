@@ -1,3 +1,7 @@
+// time comparision of cudnn and custom kernel
+// `nvcc -o v1 cudnn-vs-kernel.cu dataloader/dataloader.cu -lcudnn`
+
+
 #include "dataloader/dataloader.cuh"
 #include <iostream>
 #include <cudnn.h>
