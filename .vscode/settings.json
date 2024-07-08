@@ -1,6 +1,13 @@
 {
     "files.associations": {
         "ostream": "cpp",
-        "chrono": "cpp"
+        "chrono": "cpp",
+        "dataloader.cuh": "c",
+        "stdio.h": "c",
+        "random": "cpp",
+        "queue": "cpp",
+        "stack": "cpp",
+        "iostream": "cpp",
+        "cstddef": "cpp"
     }
 }

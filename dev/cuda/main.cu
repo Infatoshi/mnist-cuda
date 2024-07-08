@@ -1,4 +1,4 @@
-#include "dataloader/dataloader.cuh"
+#include "./dataloader/dataloader.cuh"
 #include <iostream>
 
 using namespace std;

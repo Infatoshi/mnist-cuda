@@ -2,6 +2,16 @@ import numpy as np
 import torch
 from torchvision import datasets, transforms
 
+# Load and preprocess the data
+transform = transforms.Compose([transforms.ToTensor()])
+mnist_train = datasets.MNIST(root='/mnt/d/CUDA/cuda-learn/mnist-cuda/data', train=True, download=True, transform=transform)
+mnist_test = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
+
+X_train = mnist_train.data.numpy().reshape(-1, 1, 28, 28) / 255.0
+y_train = mnist_train.targets.numpy()
+X_test = mnist_test.data.numpy().reshape(-1, 1, 28, 28) / 255.0
+y_test = mnist_test.targets.numpy()
+
 class ConvLayer:
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
         self.w = np.random.randn(out_channels, in_channels, kernel_size, kernel_size) * np.sqrt(2. / (in_channels * kernel_size * kernel_size))
@@ -79,12 +89,23 @@ class Linear:
 
     def forward(self, x):
         self.x = x
-        return np.dot(self.w, x)
+        return self.w @ x
 
     def backward(self, dout):
-        dx = np.dot(self.w.T, dout)
-        dw = np.dot(dout, self.x.T)
+        dx = self.w.T @ dout
+        dw = dout @ self.x.T
         return dx, dw
+
+def softmax(x):
+    exp_x = np.exp(x - np.max(x, axis=0, keepdims=True))
+    return exp_x / np.sum(exp_x, axis=0, keepdims=True)
+
+def cross_entropy_loss(y_pred, y_true):
+    m = y_pred.shape[1]
+    p = softmax(y_pred)
+    log_likelihood = -np.log(p[y_true, range(m)])
+    loss = np.sum(log_likelihood) / m
+    return loss
 
 class NeuralNet:
     def __init__(self):
@@ -114,34 +135,12 @@ class NeuralNet:
         dx = self.relu1.backward(dx)
         dx, conv_grad = self.conv1.backward(dx)
 
-        return [(conv_grad, ), (fc1_grad, ), (fc2_grad, )]
+        return conv_grad, fc1_grad, fc2_grad
 
-    def update_weights(self, grads, lr):
-        self.conv1.w -= lr * grads[0][0]
-        self.fc1.w -= lr * grads[1][0]
-        self.fc2.w -= lr * grads[2][0]
-
-def softmax(x):
-    exp_x = np.exp(x - np.max(x, axis=0, keepdims=True))
-    return exp_x / np.sum(exp_x, axis=0, keepdims=True)
-
-def cross_entropy_loss(y_pred, y_true):
-    m = y_pred.shape[1]
-    p = softmax(y_pred)
-    log_likelihood = -np.log(p[y_true, range(m)])
-    loss = np.sum(log_likelihood) / m
-    return loss
-
-# Load and preprocess the data
-transform = transforms.Compose([transforms.ToTensor()])
-mnist_train = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-mnist_test = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
-
-X_train = mnist_train.data.numpy().reshape(-1, 1, 28, 28) / 255.0
-y_train = mnist_train.targets.numpy()
-X_test = mnist_test.data.numpy().reshape(-1, 1, 28, 28) / 255.0
-y_test = mnist_test.targets.numpy()
-
+    def update_weights(self, conv_grad, fc1_grad, fc2_grad, lr):
+        self.conv1.w -= lr * conv_grad
+        self.fc1.w -= lr * fc1_grad
+        self.fc2.w -= lr * fc2_grad
 
 
 # Training parameters
