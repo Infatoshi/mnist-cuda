@@ -6,13 +6,13 @@
 #include <time.h>
 
 #define INPUT_SIZE 784
-#define HIDDEN_SIZE 256
+#define HIDDEN_SIZE 64
 #define OUTPUT_SIZE 10
 #define TRAIN_SIZE 10000
 #define TEST_SIZE 1000
 #define BATCH_SIZE 32
-#define EPOCHS 5
-#define LEARNING_RATE 0.01
+#define EPOCHS 3
+#define LEARNING_RATE 0.001
 
 typedef struct {
     float *weights1;
