@@ -3,18 +3,17 @@
 #include <math.h>
 #include <time.h>
 #include <curand_kernel.h>
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
-#include <iostream>
+#include <cublas_v2.h>
 
 #define INPUT_SIZE 784
 #define HIDDEN_SIZE 256
 #define OUTPUT_SIZE 10
-#define TRAIN_SIZE 10000
+#define TRAIN_SIZE 32000
 #define TEST_SIZE 1000
-#define BATCH_SIZE 1
+#define BATCH_SIZE 32
 #define EPOCHS 5
-#define LEARNING_RATE 0.1
+#define LEARNING_RATE 0.01
 
 #define CUDA_CHECK(call) \
     do { \
@@ -25,33 +24,6 @@
             exit(EXIT_FAILURE); \
         } \
     } while(0)
-
-#define CUBLAS_CHECK(call) \
-    do { \
-        cublasStatus_t status = call; \
-        if (status != CUBLAS_STATUS_SUCCESS) { \
-            fprintf(stderr, "cuBLAS error at %s:%d\n", __FILE__, __LINE__); \
-            fprintf(stderr, "Error code: %d\n", status); \
-            fprintf(stderr, "Error message: %s\n", _cudaGetErrorEnum(status)); \
-            fprintf(stderr, "Error in cuBLAS call: " #call "\n"); \
-            exit(EXIT_FAILURE); \
-        } \
-    } while(0)
-
-// Helper function to convert cuBLAS status to string
-const char* _cudaGetErrorEnum(cublasStatus_t error) {
-    switch (error) {
-        case CUBLAS_STATUS_SUCCESS:
-            return "CUBLAS_STATUS_SUCCESS";
-        case CUBLAS_STATUS_NOT_INITIALIZED:
-            return "CUBLAS_STATUS_NOT_INITIALIZED";
-        case CUBLAS_STATUS_ALLOC_FAILED:
-            return "CUBLAS_STATUS_ALLOC_FAILED";
-        // ... add other error codes as needed
-        default:
-            return "Unknown cuBLAS error";
-    }
-}
 
 typedef struct {
     float *weights1;
@@ -112,156 +84,75 @@ __device__ float relu_derivative(float x) {
     return x > 0.0f ? 1.0f : 0.0f;
 }
 
-__global__ void forward_pass(float *input, float *weights1, float *bias1, float *hidden,
-                             float *weights2, float *bias2, float *output,
-                             int input_size, int hidden_size, int output_size, int batch_size) {
+__global__ void add_bias(float *output, float *bias, int batch_size, int output_size) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y;
+
+    if (col < output_size && row < batch_size) {
+        int idx = row * output_size + col;
+        output[idx] += bias[col];
+    }
+}
+
+// Add this kernel for ReLU activation
+__global__ void relu_activation(float *data, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int batch_idx = blockIdx.y;
-
-    if (idx < hidden_size && batch_idx < batch_size) {
-        float sum = 0.0f;
-        for (int i = 0; i < input_size; i++) {
-            sum += weights1[idx * input_size + i] * input[batch_idx * input_size + i];
-        }
-        hidden[batch_idx * hidden_size + idx] = relu(sum + bias1[idx]);
-    }
-
-    __syncthreads();
-
-    if (idx < output_size && batch_idx < batch_size) {
-        float sum = 0.0f;
-        for (int i = 0; i < hidden_size; i++) {
-            sum += weights2[idx * hidden_size + i] * hidden[batch_idx * hidden_size + i];
-        }
-        output[batch_idx * output_size + idx] = sum + bias2[idx];
+    if (idx < size) {
+        data[idx] = fmaxf(0.0f, data[idx]);
     }
 }
 
-__global__ void add_bias_and_relu(float *data, float *bias, int size, int batch_size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int batch_idx = blockIdx.y;
-
-    if (idx < size && batch_idx < batch_size) {
-        int index = batch_idx * size + idx;
-        data[index] = relu(data[index] + bias[idx]);
-    }
-}
-
-__global__ void add_bias(float *data, float *bias, int size, int batch_size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int batch_idx = blockIdx.y;
-
-    if (idx < size && batch_idx < batch_size) {
-        int index = batch_idx * size + idx;
-        data[index] += bias[idx];
-    }
-}
-
-void cublasMatmul(cublasHandle_t handle, float *d_A, float *d_B, float *d_C, int M, int K, int N) {
-    float alpha = 1.0f, beta = 0.0f;
-
-    // Print input matrices
-    float *h_A = new float[M * K];
-    float *h_B = new float[K * N];
-    cudaMemcpy(h_A, d_A, M * K * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_B, d_B, K * N * sizeof(float), cudaMemcpyDeviceToHost);
-
-    std::cout << "Input A (first 10 elements): ";
-    for (int i = 0; i < std::min(10, M * K); ++i) {
-        std::cout << h_A[i] << " ";
-    }
-    std::cout << std::endl;
-
-    std::cout << "Input B (first 10 elements): ";
-    for (int i = 0; i < std::min(10, K * N); ++i) {
-        std::cout << h_B[i] << " ";
-    }
-    std::cout << std::endl;
-
-    delete[] h_A;
-    delete[] h_B;
-
-    CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, 
-                        &alpha, d_B, N, d_A, K, &beta, d_C, N));
-
-    // Print output matrix
-    float *h_C = new float[M * N];
-    cudaMemcpy(h_C, d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost);
-
-    std::cout << "Output C (first 10 elements): ";
-    for (int i = 0; i < std::min(10, M * N); ++i) {
-        std::cout << h_C[i] << " ";
-    }
-    std::cout << std::endl;
-
-    delete[] h_C;
-}
-
-// void cublasMatmul(cublasHandle_t handle, float *d_A, float *d_B, float *d_C, int M, int K, int N) {
-//     float alpha = 1.0f, beta = 0.0f;
-
-//     CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, 
-//                         &alpha, d_B, N, d_A, K, &beta, d_C, N));
-
-// }
-
-void forward_pass_cublas(cublasHandle_t handle, float *input, float *weights1, float *bias1, float *hidden,
-                         float *weights2, float *bias2, float *output,
+void forward_pass_cublas(cublasHandle_t handle, float *d_input, float *d_weights1, float *d_bias1, float *d_hidden,
+                         float *d_weights2, float *d_bias2, float *d_output,
                          int input_size, int hidden_size, int output_size, int batch_size) {
-    float alpha = 1.0f, beta = 0.0f;
+    const float alpha = 1.0f, beta = 0.0f;
 
-    std::cout << "Forward pass (cuBLAS):" << std::endl;
-
-    std::cout << "Layer 1:" << std::endl;
-    cublasMatmul(handle, input, weights1, hidden, batch_size, input_size, hidden_size);
+    // First layer: hidden = relu(input * weights1^T + bias1)
+    cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, hidden_size, batch_size, input_size,
+                &alpha, d_weights1, input_size, d_input, input_size, &beta, d_hidden, hidden_size);
     
-    dim3 block(256);
-    dim3 grid((hidden_size + block.x - 1) / block.x, batch_size);
-    add_bias_and_relu<<<grid, block>>>(hidden, bias1, hidden_size, batch_size);
-
-    // Print hidden layer output
-    float *h_hidden = new float[batch_size * hidden_size];
-    cudaMemcpy(h_hidden, hidden, batch_size * hidden_size * sizeof(float), cudaMemcpyDeviceToHost);
-    std::cout << "Hidden layer output (first 10 elements): ";
-    for (int i = 0; i < std::min(10, batch_size * hidden_size); ++i) {
-        std::cout << h_hidden[i] << " ";
-    }
-    std::cout << std::endl;
-    delete[] h_hidden;
-
-    std::cout << "Layer 2:" << std::endl;
-    cublasMatmul(handle, hidden, weights2, output, batch_size, hidden_size, output_size);
+    dim3 block_size(256, 1);
+    dim3 grid_size((hidden_size + block_size.x - 1) / block_size.x, batch_size);
+    add_bias<<<grid_size, block_size>>>(d_hidden, d_bias1, batch_size, hidden_size);
     
-    grid = dim3((output_size + block.x - 1) / block.x, batch_size);
-    add_bias<<<grid, block>>>(output, bias2, output_size, batch_size);
+    // Apply ReLU activation
+    int hidden_elements = batch_size * hidden_size;
+    int threads = 256;
+    int blocks = (hidden_elements + threads - 1) / threads;
+    relu_activation<<<blocks, threads>>>(d_hidden, hidden_elements);
 
-    // Print final output
-    float *h_output = new float[batch_size * output_size];
-    cudaMemcpy(h_output, output, batch_size * output_size * sizeof(float), cudaMemcpyDeviceToHost);
-    std::cout << "Final output (first 10 elements): ";
-    for (int i = 0; i < std::min(10, batch_size * output_size); ++i) {
-        std::cout << h_output[i] << " ";
-    }
-    std::cout << std::endl;
-    delete[] h_output;
+    // Second layer: output = hidden * weights2^T + bias2
+    cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, output_size, batch_size, hidden_size,
+                &alpha, d_weights2, hidden_size, d_hidden, hidden_size, &beta, d_output, output_size);
+
+    grid_size = dim3((output_size + block_size.x - 1) / block_size.x, batch_size);
+    add_bias<<<grid_size, block_size>>>(d_output, d_bias2, batch_size, output_size);
 }
 
-// void forward_pass_cublas(cublasHandle_t handle, float *input, float *weights1, float *bias1, float *hidden,
-//                          float *weights2, float *bias2, float *output,
-//                          int input_size, int hidden_size, int output_size, int batch_size) {
-//     float alpha = 1.0f, beta = 0.0f;
 
-//     // (handle, weights1, x, w, M, K, N)
-//     cublasMatmul(handle, input, weights1, hidden, batch_size, input_size, hidden_size);
-    
-//     dim3 block(256);
-//     dim3 grid((hidden_size + block.x - 1) / block.x, batch_size);
-//     add_bias_and_relu<<<grid, block>>>(hidden, bias1, hidden_size, batch_size);
+// __global__ void forward_pass_naive(float *input, float *weights1, float *bias1, float *hidden,
+//                                    float *weights2, float *bias2, float *output,
+//                                    int input_size, int hidden_size, int output_size, int batch_size) {
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     int batch_idx = blockIdx.y;
 
-//     cublasMatmul(handle, hidden, weights2, output, batch_size, hidden_size, output_size);
-    
-//     grid = dim3((output_size + block.x - 1) / block.x, batch_size);
-//     add_bias<<<grid, block>>>(output, bias2, output_size, batch_size);
+//     if (idx < hidden_size && batch_idx < batch_size) {
+//         float sum = 0.0f;
+//         for (int i = 0; i < input_size; i++) {
+//             sum += weights1[idx * input_size + i] * input[batch_idx * input_size + i];
+//         }
+//         hidden[batch_idx * hidden_size + idx] = fmaxf(0.0f, sum + bias1[idx]);  // ReLU activation included
+//     }
+
+//     __syncthreads();
+
+//     if (idx < output_size && batch_idx < batch_size) {
+//         float sum = 0.0f;
+//         for (int i = 0; i < hidden_size; i++) {
+//             sum += weights2[idx * hidden_size + i] * hidden[batch_idx * hidden_size + i];
+//         }
+//         output[batch_idx * output_size + idx] = sum + bias2[idx];
+//     }
 // }
 
 __global__ void softmax(float *output, int output_size, int batch_size) {
@@ -284,6 +175,7 @@ __global__ void softmax(float *output, int output_size, int batch_size) {
         }
     }
 }
+
 
 __global__ void backward_pass(float *input, float *hidden, float *output, int *labels,
                               float *weights1, float *weights2,
@@ -346,8 +238,6 @@ void train(NeuralNetwork *nn, float *X_train, int *y_train) {
     float *d_input, *d_hidden, *d_output;
     float *d_grad_weights1, *d_grad_weights2, *d_grad_bias1, *d_grad_bias2;
     int *d_labels;
-    cublasHandle_t handle;
-    CUBLAS_CHECK(cublasCreate(&handle));
 
     // Allocate device memory
     CUDA_CHECK(cudaMalloc(&d_weights1, HIDDEN_SIZE * INPUT_SIZE * sizeof(float)));
@@ -372,6 +262,9 @@ void train(NeuralNetwork *nn, float *X_train, int *y_train) {
     int block_size = 256;
     dim3 grid_size((max(HIDDEN_SIZE, OUTPUT_SIZE) + block_size - 1) / block_size, BATCH_SIZE);
 
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+
     for (int epoch = 0; epoch < EPOCHS; epoch++) {
         float total_loss = 0.0f;
         int correct = 0;
@@ -381,74 +274,10 @@ void train(NeuralNetwork *nn, float *X_train, int *y_train) {
             CUDA_CHECK(cudaMemcpy(d_input, &X_train[batch * BATCH_SIZE * INPUT_SIZE], BATCH_SIZE * INPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_labels, &y_train[batch * BATCH_SIZE], BATCH_SIZE * sizeof(int), cudaMemcpyHostToDevice));
 
-            bool print_debug = (epoch == 0 && batch == 0);
-
-            if (print_debug) {
-                std::cout << "Debug information for first batch of first epoch:" << std::endl;
-            }
-
             // Forward pass
-;
             forward_pass_cublas(handle, d_input, d_weights1, d_bias1, d_hidden, d_weights2, d_bias2, d_output, INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, BATCH_SIZE);
-            
-            if (print_debug) {
-                // Print output before softmax
-                float output[BATCH_SIZE * OUTPUT_SIZE];
-                CUDA_CHECK(cudaMemcpy(output, d_output, BATCH_SIZE * OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
-                std::cout << "Output before softmax: ";
-                for (int i = 0; i < 10; i++) {
-                    printf("%f ", output[i]);
-                }
-                std::cout << std::endl;
-            }
-            
-            // copy output to host
-            float output[BATCH_SIZE * OUTPUT_SIZE];
-            
-            // if (epoch == 0 && batch == 0) {
-            // CUDA_CHECK(cudaMemcpy(output, d_output, BATCH_SIZE * OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
-            
-            // std::cout << "cublas: " << std::endl;
-            // // print results
-            // for (int i = 0; i < 10; i++) {
-            //     printf("%f ", output[i]);
-            // }
-            // std::cout << std::endl;
-
-            // // copy back to device
-            // CUDA_CHECK(cudaMemcpy(d_output, output, BATCH_SIZE * OUTPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice));
-            //     }
-
             // forward_pass<<<grid_size, block_size>>>(d_input, d_weights1, d_bias1, d_hidden, d_weights2, d_bias2, d_output, INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, BATCH_SIZE);
-            
-            // if (epoch == 0 && batch == 0) {
-            // // copy output to host
-            // CUDA_CHECK(cudaMemcpy(output, d_output, BATCH_SIZE * OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
-
-            // std::cout << "normal: " << std::endl;
-            // // print results
-            // for (int i = 0; i < 10; i++) {
-            //     printf("%f ", output[i]);
-            // }
-            // std::cout << std::endl;
-            
-            // // copy back to device
-            // CUDA_CHECK(cudaMemcpy(d_output, output, BATCH_SIZE * OUTPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice));
-                
-            //     }
-
             softmax<<<BATCH_SIZE, 1>>>(d_output, OUTPUT_SIZE, BATCH_SIZE);
-
-            if (print_debug) {
-                // Print output after softmax
-                float output[BATCH_SIZE * OUTPUT_SIZE];
-                CUDA_CHECK(cudaMemcpy(output, d_output, BATCH_SIZE * OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
-                std::cout << "Output after softmax: ";
-                for (int i = 0; i < 10; i++) {
-                    printf("%f ", output[i]);
-                }
-                std::cout << std::endl;
-            }
 
             // Backward pass
             backward_pass<<<grid_size, block_size>>>(d_input, d_hidden, d_output, d_labels, d_weights1, d_weights2, d_grad_weights1, d_grad_weights2, d_grad_bias1, d_grad_bias2, INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, BATCH_SIZE);
@@ -458,7 +287,7 @@ void train(NeuralNetwork *nn, float *X_train, int *y_train) {
             update_weights<<<(OUTPUT_SIZE * HIDDEN_SIZE + block_size - 1) / block_size, block_size>>>(d_weights2, d_grad_weights2, d_bias2, d_grad_bias2, OUTPUT_SIZE * HIDDEN_SIZE, LEARNING_RATE, BATCH_SIZE);
 
             // Compute loss and accuracy (on CPU for simplicity)
-            // float output[BATCH_SIZE * OUTPUT_SIZE];
+            float output[BATCH_SIZE * OUTPUT_SIZE];
             CUDA_CHECK(cudaMemcpy(output, d_output, BATCH_SIZE * OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
 
             for (int i = 0; i < BATCH_SIZE; i++) {
@@ -480,6 +309,59 @@ void train(NeuralNetwork *nn, float *X_train, int *y_train) {
         printf("Epoch %d/%d, Loss: %.4f, Accuracy: %.2f%%\n", 
                epoch + 1, EPOCHS, total_loss / TRAIN_SIZE, 100.0f * correct / TRAIN_SIZE);
     }
+
+    // After training, print out the first 16 images along with predicted labels
+    float *d_single_input;
+    float *d_single_hidden;
+    float *d_single_output;
+    CUDA_CHECK(cudaMalloc(&d_single_input, INPUT_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_single_hidden, HIDDEN_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_single_output, OUTPUT_SIZE * sizeof(float)));
+
+    dim3 single_grid_size((max(HIDDEN_SIZE, OUTPUT_SIZE) + block_size - 1) / block_size, 1);
+
+
+    for (int i = 0; i < 16; i++) {
+        // Copy input to device
+        CUDA_CHECK(cudaMemcpy(d_single_input, &X_train[i * INPUT_SIZE], INPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice));
+
+        // Forward pass for a single image
+        forward_pass_cublas(handle, d_single_input, d_weights1, d_bias1, d_single_hidden, d_weights2, d_bias2, d_single_output, INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, 1);
+        // forward_pass<<<single_grid_size, block_size>>>(d_single_input, d_weights1, d_bias1, d_single_hidden, d_weights2, d_bias2, d_single_output, INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, 1);
+        softmax<<<1, 1>>>(d_single_output, OUTPUT_SIZE, 1);
+
+        // Copy output back to host
+        float output[OUTPUT_SIZE];
+        CUDA_CHECK(cudaMemcpy(output, d_single_output, OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
+
+        // Print image
+        printf("Image %d:\n", i);
+        for (int j = 0; j < 28; j++) {
+            for (int k = 0; k < 28; k++) {
+                if (X_train[i * INPUT_SIZE + j * 28 + k] > 0.0f) {
+                    printf("X");
+                } else {
+                    printf(" ");
+                }
+            }
+            printf("\n");
+        }
+
+        // Print predicted label
+        int predicted = 0;
+        for (int j = 1; j < OUTPUT_SIZE; j++) {
+            if (output[j] > output[predicted]) {
+                predicted = j;
+            }
+        }
+        printf("Predicted label: %d\n", predicted);
+        printf("Actual label: %d\n\n", y_train[i]);
+    }
+
+    // Free additional device memory
+    cudaFree(d_single_input);
+    cudaFree(d_single_hidden);
+    cudaFree(d_single_output);
 
     // Copy weights and biases back to host
     CUDA_CHECK(cudaMemcpy(nn->weights1, d_weights1, HIDDEN_SIZE * INPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
@@ -552,6 +434,13 @@ int main() {
 
     train(&nn, X_train, y_train);
 
+    // Print first 10 training labels
+    printf("First 10 training labels: ");
+    for (int i = 0; i < 10; i++) {
+        printf("%d ", y_train[i]);
+    }
+    printf("\n");
+
     free(nn.weights1);
     free(nn.weights2);
     free(nn.bias1);
@@ -561,3 +450,5 @@ int main() {
 
     return 0;
 }
+
+
