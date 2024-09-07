@@ -41,3 +41,14 @@ pip install -r requirements.txt
 
 We train an MLP on the MNIST dataset.
 We implement both the batched training run in pytorch, then translate over to CUDA C/C++ using iteratively optimized GPU kernels. I purposely left out batchnorm, residual blocks, lower-precision, and other optimizations to keep the code simple and easy to understand. It would also take wayyyy longer to implement and explain.
+
+## Kernel Conversion
+> we will change the following functions to kernels:
+matmul_a_bt and matmul_at_b
+relu_forward and relu_backward
+bias_forward and bias_backward
+softmax
+compute_grad_output
+compute_output_gradients
+compute_hidden_gradients
+update_gradients

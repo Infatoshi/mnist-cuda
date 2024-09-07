@@ -8,10 +8,11 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
+TRAIN_SIZE = 10000
 epochs = 3
 learning_rate = 1e-3
-batch_size = 16
-num_epochs = 5
+batch_size = 4
+num_epochs = 3
 data_dir = "../../../data"
 
 torch.set_float32_matmul_precision("high")
@@ -61,7 +62,7 @@ for idx, (data, label) in enumerate(test_loader):
 print("Test Data Shape:", test_data.shape)
 print("Test Data Type:", test_data.dtype)
 
-iters_per_epoch = len(train_dataset) // batch_size
+iters_per_epoch = TRAIN_SIZE // batch_size
 print("Iters per epoch:", iters_per_epoch)
 
 
@@ -137,9 +138,8 @@ def evaluate(model, test_data, test_labels):
 
 # Main
 if __name__ == "__main__":
-    for epoch in range(1):
+    for epoch in range(epochs):
         train(model, criterion, optimizer, epoch)
         evaluate(model, test_data, test_labels)
 
     print("Finished Training")
-
