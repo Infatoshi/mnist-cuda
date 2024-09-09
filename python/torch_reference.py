@@ -91,11 +91,13 @@ optimizer = optim.SGD(model.parameters(), lr=learning_rate)
 def train(model, criterion, optimizer, epoch):
     model.train()
     running_loss = 0.0
+
     for i in range(iters_per_epoch):
 
         optimizer.zero_grad()
         data = train_data[i * batch_size : (i + 1) * batch_size].to("cuda")
         target = train_labels[i * batch_size : (i + 1) * batch_size].to("cuda")
+
         start = time.time()
         outputs = model(data)
         loss = criterion(outputs, target)
