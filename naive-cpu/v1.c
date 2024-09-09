@@ -70,13 +70,6 @@ void initialize_bias(float *bias, int size) {
     }
 }
 
-// Modify relu to work with batches
-void relu(float *x, int size) {
-    for (int i = 0; i < size; i++) {
-        x[i] = fmaxf(0.0f, x[i]);
-    }
-}
-
 // Modify softmax to work with batches
 void softmax(float *x, int batch_size, int size) {
     for (int b = 0; b < batch_size; b++) {
@@ -148,7 +141,7 @@ void bias_forward(float *x, float *bias, int batch_size, int size) {
 
 // Modified forward function
 void forward(NeuralNetwork *nn, float *input, float *hidden, float *output, int batch_size) {
-    // Input to Hidden (X @ W1.T)
+    // Input to Hidden (X @ W1)
     matmul_a_b(input, nn->weights1, hidden, batch_size, INPUT_SIZE, HIDDEN_SIZE);
     
     // Add bias1
@@ -157,7 +150,7 @@ void forward(NeuralNetwork *nn, float *input, float *hidden, float *output, int 
     // Apply ReLU
     relu_forward(hidden, batch_size * HIDDEN_SIZE);
 
-    // Hidden to Output (Hidden @ W2.T)
+    // Hidden to Output (Hidden @ W2)
     matmul_a_b(hidden, nn->weights2, output, batch_size, HIDDEN_SIZE, OUTPUT_SIZE);
 
     // Add bias2
@@ -245,6 +238,7 @@ void backward(NeuralNetwork *nn, float *input, float *hidden, float *output, int
     // Compute dX2 (gradient of loss w.r.t. input of second layer)
     float *dX2 = malloc(batch_size * HIDDEN_SIZE * sizeof(float));
 
+    // grad_output @ W2.T = dX2 -> (B, 10) @ (10, 256) = (B, 256)
     matmul_a_bt(grad_output, nn->weights2, dX2, batch_size, OUTPUT_SIZE, HIDDEN_SIZE);
 
     // Compute d_ReLU_out (element-wise multiplication with ReLU derivative)
@@ -252,7 +246,7 @@ void backward(NeuralNetwork *nn, float *input, float *hidden, float *output, int
     for (int i = 0; i < batch_size * HIDDEN_SIZE; i++) {
         d_ReLU_out[i] = dX2[i] * (hidden[i] > 0);
     }
-
+    // retains its shape since its just a point-wise operation
     // Update gradients for weights1 (W1.grad = d_ReLU_out.T @ input)
     matmul_at_b(input, d_ReLU_out, nn->grad_weights1, batch_size, INPUT_SIZE, HIDDEN_SIZE);
 

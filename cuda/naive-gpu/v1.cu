@@ -179,14 +179,16 @@ __global__ void clip_gradients_kernel(float *gradients, int size, float max_norm
 
 // Modified forward function using CUDA kernels
 void forward(NeuralNetwork *nn, float *d_input, float *d_hidden, float *d_output, int batch_size) {
+    // 1024 threads/blocks
     dim3 block_size(32, 32);
+    // just enough blocks + threads for our naive matmul kernel
     dim3 grid_size((HIDDEN_SIZE + block_size.x - 1) / block_size.x, (batch_size + block_size.y - 1) / block_size.y);
 
-    // Input to Hidden (X @ W1.T)
+    // Input to Hidden (X @ W1)
     matmul_a_b_kernel<<<grid_size, block_size>>>(d_input, nn->weights1, d_hidden, batch_size, INPUT_SIZE, HIDDEN_SIZE);
     CUDA_CHECK(cudaGetLastError());
 
-    // Add bias1
+    // Add bias1 (one bias term for each neuron (multiple weights))
     bias_add_kernel<<<(batch_size * HIDDEN_SIZE + 255) / 256, 256>>>(d_hidden, nn->bias1, batch_size, HIDDEN_SIZE);
     CUDA_CHECK(cudaGetLastError());
 
@@ -194,13 +196,13 @@ void forward(NeuralNetwork *nn, float *d_input, float *d_hidden, float *d_output
     relu_kernel<<<(batch_size * HIDDEN_SIZE + 255) / 256, 256>>>(d_hidden, batch_size * HIDDEN_SIZE);
     CUDA_CHECK(cudaGetLastError());
 
-    // Hidden to Output (Hidden @ W2.T)
+    // Hidden to Output (Hidden @ W2)
     grid_size.x = (OUTPUT_SIZE + block_size.x - 1) / block_size.x;
     grid_size.y = (batch_size + block_size.y - 1) / block_size.y;
     matmul_a_b_kernel<<<grid_size, block_size>>>(d_hidden, nn->weights2, d_output, batch_size, HIDDEN_SIZE, OUTPUT_SIZE);
     CUDA_CHECK(cudaGetLastError());
 
-    // Add bias2
+    // Add bias2 (also one bias term per neuron)
     bias_add_kernel<<<(batch_size * OUTPUT_SIZE + 255) / 256, 256>>>(d_output, nn->bias2, batch_size, OUTPUT_SIZE);
     CUDA_CHECK(cudaGetLastError());
 
@@ -211,7 +213,7 @@ void forward(NeuralNetwork *nn, float *d_input, float *d_hidden, float *d_output
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-// Modify cross_entropy_loss to work with batches
+// Modify cross_entropy_loss to work with batches (w/out softmax because we already do this in the forward pass)
 float cross_entropy_loss(float *output, int *labels, int batch_size) {
     float total_loss = 0.0f;
     for (int b = 0; b < batch_size; b++) {
@@ -277,6 +279,7 @@ __global__ void multiply_gradients_kernel(float *grad1, float *grad2, int size) 
 }
 
 // Modified backward function using CUDA kernels
+// shape rotating is on par with the visual example (excalidraw diagram) in the mnist-cuda git repo (also found in "assets")
 void backward(NeuralNetwork *nn, float *d_input, float *d_hidden, float *d_output, int *d_labels, int batch_size) {
     // Initialize gradients to zero using CUDA kernel
 
