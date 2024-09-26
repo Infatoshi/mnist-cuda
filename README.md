@@ -5,7 +5,7 @@
 
 
 ## Setup
-
+> DISCLAIMER: ensure you have a GPU with compute capability 5.0 or greater (at least maxwell architecture). See compatibilty guide: https://docs.nvidia.com/deeplearning/cudnn/latest/reference/support-matrix.html
 ```bash
 git clone https://github.com/Infatoshi/mnist-cuda
 python3 -m venv venv
