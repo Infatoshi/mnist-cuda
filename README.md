@@ -7,19 +7,16 @@
 ## Setup
 
 ```bash
-git clone https://github.com/Infatoshi/mnist-cuda`
+git clone https://github.com/Infatoshi/mnist-cuda
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+## Purpose
 
-## Naive SGEMM vs cuBLAS SGEMM (Matmul)
+We train an MLP on the MNIST dataset.
+We implement both the batched training run in pytorch, then translate over to CUDA C/C++ using iteratively optimized GPU kernels. I purposely left out batchnorm, residual blocks, lower-precision, and other optimizations to keep the code simple and easy to understand. It would also take wayyyy longer to implement and explain.
 
--
-
-## Naive ReLU vs cuDNN ReLU
-
-- haven't compared yet
 
 ## What we need to watch out for + pay attention to:
 
@@ -36,11 +33,6 @@ pip install -r requirements.txt
   - Streams allow for overlapping data transfer (prefetching) with computation.
   - While one stream is executing a kernel, another stream can be transferring data for the next computation.
   - This technique is often called "double buffering" or "multi-buffering" when extended to more buffers.
-
-## Purpose
-
-We train an MLP on the MNIST dataset.
-We implement both the batched training run in pytorch, then translate over to CUDA C/C++ using iteratively optimized GPU kernels. I purposely left out batchnorm, residual blocks, lower-precision, and other optimizations to keep the code simple and easy to understand. It would also take wayyyy longer to implement and explain.
 
 ## Kernel Conversion
 > we will change the following functions to kernels:
