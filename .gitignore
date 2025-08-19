@@ -3,6 +3,11 @@ data
 python/data
 python/venv
 .vscode
+.venv
 .gitignore
 mnist_data
 dev
+excalidraw.log
+FINALREPORT.md
+uv.lock
+pyproject.toml
