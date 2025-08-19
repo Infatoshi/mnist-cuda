@@ -1,10 +1,11 @@
 import os
+import shutil
 
 import numpy as np
 from torchvision import datasets, transforms
 
 # Set the directory where you want to save the files
-save_dir = "mnist_data"
+save_dir = "data"
 os.makedirs(save_dir, exist_ok=True)
 
 # Download and load the MNIST dataset
@@ -35,4 +36,14 @@ with open(os.path.join(save_dir, "metadata.txt"), "w") as f:
     f.write(f"Input dimensions: {X_train.shape[1]}\n")
     f.write(f"Number of classes: {len(np.unique(y_train))}\n")
 
-print("MNIST dataset has been downloaded and saved in binary format.")
+# Remove mnist_data directory if it exists
+if os.path.exists("mnist_data"):
+    shutil.rmtree("mnist_data")
+    print("Removed mnist_data directory")
+
+# Remove MNIST raw data directory after processing
+if os.path.exists(os.path.join(save_dir, "MNIST")):
+    shutil.rmtree(os.path.join(save_dir, "MNIST"))
+    print("Removed MNIST raw data directory")
+
+print("MNIST dataset has been downloaded and saved in binary format in data/ directory.")
