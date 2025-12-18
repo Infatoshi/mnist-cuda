@@ -6,20 +6,19 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 
-// CORRECTED timing structure - separating actual operations
+// Timing structure
 typedef struct {
-    double memory_transfers;  // H2D + D2H only
-    double gpu_compute;      // Forward + Backward + Update (GPU work)
-    double host_computation; // Loss + grad computation only
+    double memory_transfers;  // H2D only (data at start of batch)
+    double gpu_compute;       // Forward + Loss + Backward + Update (all GPU)
     double total_time;
 } TimingStats;
 
 #define INPUT_SIZE 784
-#define HIDDEN_SIZE 256
+#define HIDDEN_SIZE 1024
 #define OUTPUT_SIZE 10
 #define TRAIN_SIZE 10000
 #define TEST_SIZE 10000
-#define BATCH_SIZE 8
+#define BATCH_SIZE 32
 #define EPOCHS 10
 #define LEARNING_RATE 0.01
 
@@ -51,12 +50,12 @@ typedef struct {
     float *d_weights1, *d_weights2, *d_bias1, *d_bias2;
     float *d_grad_weights1, *d_grad_weights2, *d_grad_bias1, *d_grad_bias2;
     float *d_fc1_output, *d_fc2_output, *d_grad_hidden, *d_grad_output;
-    
+
     // PERSISTENT BUFFERS - NO MORE MALLOC/FREE PER BATCH
     float *d_input_batch;
-    float *h_fc2_output;
-    float *h_grad_output;
-    
+    int *d_labels;           // Labels on GPU for loss computation
+    float *d_loss;           // Per-sample loss for reduction
+
     cublasHandle_t cublas_handle;
 } NeuralNetworkCUDA;
 
@@ -123,6 +122,79 @@ __global__ void bias_backward_kernel(float *grad_output, float *grad_bias, int b
     }
 }
 
+// GPU-side softmax + cross-entropy loss + backward gradient
+// Eliminates D2H logits transfer and H2D gradient transfer
+__global__ void softmax_cross_entropy_backward_kernel(
+    float *logits,           // Input: raw logits [batch x classes]
+    int *labels,             // Input: ground truth labels [batch]
+    float *grad_output,      // Output: gradients [batch x classes]
+    float *loss_per_sample,  // Output: loss per sample [batch]
+    int batch_size,
+    int num_classes
+) {
+    int b = blockIdx.x;  // One block per sample
+    if (b >= batch_size) return;
+
+    // Use shared memory for this sample's logits
+    extern __shared__ float shared[];
+    float *sample_logits = shared;
+
+    int tid = threadIdx.x;
+
+    // Load logits to shared memory
+    if (tid < num_classes) {
+        sample_logits[tid] = logits[b * num_classes + tid];
+    }
+    __syncthreads();
+
+    // Find max for numerical stability (single thread for small num_classes)
+    __shared__ float max_logit;
+    __shared__ float sum_exp;
+
+    if (tid == 0) {
+        max_logit = sample_logits[0];
+        for (int i = 1; i < num_classes; i++) {
+            if (sample_logits[i] > max_logit) max_logit = sample_logits[i];
+        }
+    }
+    __syncthreads();
+
+    // Compute exp(logit - max)
+    if (tid < num_classes) {
+        sample_logits[tid] = expf(sample_logits[tid] - max_logit);
+    }
+    __syncthreads();
+
+    // Compute sum of exponentials
+    if (tid == 0) {
+        sum_exp = 0.0f;
+        for (int i = 0; i < num_classes; i++) {
+            sum_exp += sample_logits[i];
+        }
+    }
+    __syncthreads();
+
+    // Compute softmax, gradient, and loss
+    if (tid < num_classes) {
+        float prob = sample_logits[tid] / sum_exp;
+        int label = labels[b];
+
+        // Gradient: (prob - one_hot) / batch_size
+        float grad = prob;
+        if (tid == label) {
+            grad -= 1.0f;
+        }
+        grad /= (float)batch_size;
+
+        grad_output[b * num_classes + tid] = grad;
+
+        // Loss contribution (only for correct class)
+        if (tid == label) {
+            loss_per_sample[b] = -logf(fmaxf(prob, 1e-7f));
+        }
+    }
+}
+
 // FORWARD PASS ONLY - separate function
 void forward_pass_only(NeuralNetworkCUDA *nn, int batch_size) {
     const float alpha = 1.0f, beta = 0.0f;
@@ -149,11 +221,10 @@ void forward_pass_only(NeuralNetworkCUDA *nn, int batch_size) {
                            nn->d_fc1_output, HIDDEN_SIZE, &beta,
                            nn->d_fc2_output, OUTPUT_SIZE));
 
-    // Forward bias add 2 + SYNC (only because CPU needs this data)
+    // Forward bias add 2 (no sync needed - loss computed on GPU)
     int total_out = batch_size * OUTPUT_SIZE;
     int grid_out = (total_out + 255) / 256;
     bias_add_kernel<<<grid_out, 256>>>(nn->d_fc2_output, nn->d_bias2, batch_size, OUTPUT_SIZE);
-    CUDA_CHECK(cudaDeviceSynchronize()); // Required for CPU copy
 }
 
 // BACKWARD PASS ONLY - separate function  
@@ -218,32 +289,24 @@ void update_weights_only(NeuralNetworkCUDA *nn, float lr) {
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-float compute_loss_and_grad(int batch_size, float *h_logits, int *labels, float *h_grad) {
-    float loss = 0.0f;
-    for (int b = 0; b < batch_size; b++) {
-        float *logits = h_logits + b * OUTPUT_SIZE;
-        int label = labels[b];
-        float max_logit = -INFINITY;
-        for (int i = 0; i < OUTPUT_SIZE; i++) {
-            if (logits[i] > max_logit) max_logit = logits[i];
-        }
-        float sum_exp = 0.0f;
-        for (int i = 0; i < OUTPUT_SIZE; i++) {
-            float shifted = logits[i] - max_logit;
-            float expv = expf(shifted);
-            sum_exp += expv;
-            h_grad[b * OUTPUT_SIZE + i] = expv;
-        }
-        loss -= (logits[label] - max_logit - logf(sum_exp));
-        for (int i = 0; i < OUTPUT_SIZE; i++) {
-            h_grad[b * OUTPUT_SIZE + i] /= sum_exp;
-        }
-        h_grad[b * OUTPUT_SIZE + label] -= 1.0f;
+// GPU-side loss computation function
+// Returns average loss after computing softmax, cross-entropy, and gradients on GPU
+float compute_loss_on_gpu(NeuralNetworkCUDA *nn, int batch_size) {
+    // Launch softmax + cross-entropy + backward kernel
+    int shared_mem = OUTPUT_SIZE * sizeof(float);
+    softmax_cross_entropy_backward_kernel<<<batch_size, 32, shared_mem>>>(
+        nn->d_fc2_output, nn->d_labels, nn->d_grad_output, nn->d_loss,
+        batch_size, OUTPUT_SIZE);
+
+    // Copy per-sample losses back and reduce on CPU (small transfer: 32 floats)
+    float h_loss[BATCH_SIZE];
+    CUDA_CHECK(cudaMemcpy(h_loss, nn->d_loss, batch_size * sizeof(float), cudaMemcpyDeviceToHost));
+
+    float total_loss = 0.0f;
+    for (int i = 0; i < batch_size; i++) {
+        total_loss += h_loss[i];
     }
-    for (int i = 0; i < batch_size * OUTPUT_SIZE; i++) {
-        h_grad[i] /= batch_size;
-    }
-    return loss / batch_size;
+    return total_loss / batch_size;
 }
 
 void initialize_random_weights_cuda(NeuralNetworkCUDA *nn) {
@@ -285,12 +348,8 @@ void initialize_nn_cuda(NeuralNetworkCUDA *nn) {
 
     // PERSISTENT BUFFERS - ALLOCATED ONCE, REUSED FOR ALL BATCHES
     CUDA_CHECK(cudaMalloc(&nn->d_input_batch, BATCH_SIZE * INPUT_SIZE * sizeof(float)));
-    nn->h_fc2_output = (float *)malloc(BATCH_SIZE * OUTPUT_SIZE * sizeof(float));
-    nn->h_grad_output = (float *)malloc(BATCH_SIZE * OUTPUT_SIZE * sizeof(float));
-    if (!nn->h_fc2_output || !nn->h_grad_output) {
-        fprintf(stderr, "Failed to allocate persistent host buffers\n");
-        exit(EXIT_FAILURE);
-    }
+    CUDA_CHECK(cudaMalloc(&nn->d_labels, BATCH_SIZE * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&nn->d_loss, BATCH_SIZE * sizeof(float)));
 
     CUBLAS_CHECK(cublasCreate(&nn->cublas_handle));
     initialize_random_weights_cuda(nn);
@@ -312,9 +371,9 @@ void free_nn_cuda(NeuralNetworkCUDA *nn) {
     
     // Free persistent buffers
     CUDA_CHECK(cudaFree(nn->d_input_batch));
-    free(nn->h_fc2_output);
-    free(nn->h_grad_output);
-    
+    CUDA_CHECK(cudaFree(nn->d_labels));
+    CUDA_CHECK(cudaFree(nn->d_loss));
+
     CUBLAS_CHECK(cublasDestroy(nn->cublas_handle));
 }
 
@@ -344,46 +403,29 @@ int main() {
             float *batch_input = train_data + batch * BATCH_SIZE * INPUT_SIZE;
             int *batch_labels = train_labels + batch * BATCH_SIZE;
 
-            // === H2D Transfer (using persistent buffer) ===
+            // === H2D Transfer: input data + labels ===
             clock_gettime(CLOCK_MONOTONIC, &step_start);
             CUDA_CHECK(cudaMemcpy(nn.d_input_batch, batch_input, BATCH_SIZE * INPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(nn.d_labels, batch_labels, BATCH_SIZE * sizeof(int), cudaMemcpyHostToDevice));
             clock_gettime(CLOCK_MONOTONIC, &step_end);
             stats.memory_transfers += get_time_diff(step_start, step_end);
 
-            // === FORWARD PASS ONLY ===
+            // === ALL GPU COMPUTATION ===
             clock_gettime(CLOCK_MONOTONIC, &step_start);
+
+            // Forward pass
             forward_pass_only(&nn, BATCH_SIZE);
-            clock_gettime(CLOCK_MONOTONIC, &step_end);
-            stats.gpu_compute += get_time_diff(step_start, step_end);
 
-            // === D2H Transfer (using persistent buffer) ===
-            clock_gettime(CLOCK_MONOTONIC, &step_start);
-            CUDA_CHECK(cudaMemcpy(nn.h_fc2_output, nn.d_fc2_output, BATCH_SIZE * OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
-            clock_gettime(CLOCK_MONOTONIC, &step_end);
-            stats.memory_transfers += get_time_diff(step_start, step_end);
-
-            // === Host Loss Computation ONLY ===
-            clock_gettime(CLOCK_MONOTONIC, &step_start);
-            float batch_loss = compute_loss_and_grad(BATCH_SIZE, nn.h_fc2_output, batch_labels, nn.h_grad_output);
+            // Loss + backward gradient (GPU-side softmax + cross-entropy)
+            float batch_loss = compute_loss_on_gpu(&nn, BATCH_SIZE);
             total_loss += batch_loss;
-            clock_gettime(CLOCK_MONOTONIC, &step_end);
-            stats.host_computation += get_time_diff(step_start, step_end);
 
-            // === H2D Gradient Transfer (using persistent buffer) ===
-            clock_gettime(CLOCK_MONOTONIC, &step_start);
-            CUDA_CHECK(cudaMemcpy(nn.d_grad_output, nn.h_grad_output, BATCH_SIZE * OUTPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice));
-            clock_gettime(CLOCK_MONOTONIC, &step_end);
-            stats.memory_transfers += get_time_diff(step_start, step_end);
-
-            // === BACKWARD PASS ===
-            clock_gettime(CLOCK_MONOTONIC, &step_start);
+            // Backward pass
             backward_pass_only(&nn, BATCH_SIZE);
-            clock_gettime(CLOCK_MONOTONIC, &step_end);
-            stats.gpu_compute += get_time_diff(step_start, step_end);
 
-            // === WEIGHT UPDATES ===
-            clock_gettime(CLOCK_MONOTONIC, &step_start);
+            // Weight updates
             update_weights_only(&nn, LEARNING_RATE);
+
             clock_gettime(CLOCK_MONOTONIC, &step_end);
             stats.gpu_compute += get_time_diff(step_start, step_end);
         }
@@ -393,15 +435,12 @@ int main() {
     clock_gettime(CLOCK_MONOTONIC, &end);
     stats.total_time = get_time_diff(start, end);
     
-    printf("\n=== CUBLAS GPU IMPLEMENTATION TIMING BREAKDOWN ===\n");
-    printf("Total training time: %.1f seconds\n\n", stats.total_time);
-    
-    printf("Detailed Breakdown:\n");
-    printf("  Data loading:     %6.3fs (%5.1f%%)\n", stats.memory_transfers, 100.0 * stats.memory_transfers / stats.total_time);
-    printf("  Forward pass:     %6.3fs (%5.1f%%)\n", stats.gpu_compute * 0.4, 100.0 * stats.gpu_compute * 0.4 / stats.total_time);
-    printf("  Loss computation: %6.3fs (%5.1f%%)\n", stats.host_computation, 100.0 * stats.host_computation / stats.total_time);
-    printf("  Backward pass:    %6.3fs (%5.1f%%)\n", stats.gpu_compute * 0.4, 100.0 * stats.gpu_compute * 0.4 / stats.total_time);
-    printf("  Weight updates:   %6.3fs (%5.1f%%)\n", stats.gpu_compute * 0.2, 100.0 * stats.gpu_compute * 0.2 / stats.total_time);
+    printf("\n=== CUBLAS GPU IMPLEMENTATION (ALL COMPUTATION ON GPU) ===\n");
+    printf("Total training time: %.3f seconds\n\n", stats.total_time);
+
+    printf("Timing Breakdown:\n");
+    printf("  H2D transfers:  %6.3fs (%5.1f%%)\n", stats.memory_transfers, 100.0 * stats.memory_transfers / stats.total_time);
+    printf("  GPU compute:    %6.3fs (%5.1f%%)\n", stats.gpu_compute, 100.0 * stats.gpu_compute / stats.total_time);
 
     free_nn_cuda(&nn);
     free(train_data);

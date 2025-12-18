@@ -8,7 +8,7 @@ import torch.optim as optim
 TRAIN_SIZE = 10000
 epochs = 10
 learning_rate = 1e-2
-batch_size = 8
+batch_size = 32
 
 torch.set_float32_matmul_precision("high")
 
@@ -48,7 +48,7 @@ class MLP(nn.Module):
 
 
 # Use random seed for natural variance (no fixed seed)
-model = MLP(in_features=784, hidden_features=256, num_classes=10).to("cuda")
+model = MLP(in_features=784, hidden_features=1024, num_classes=10).to("cuda")
 
 # Apply custom He initialization to match NumPy/C implementations
 with torch.no_grad():

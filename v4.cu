@@ -31,11 +31,11 @@ double get_time_diff(struct timespec start, struct timespec end) {
 }
 
 #define INPUT_SIZE 784
-#define HIDDEN_SIZE 256
+#define HIDDEN_SIZE 1024
 #define OUTPUT_SIZE 10
 #define TRAIN_SIZE 10000
 #define TEST_SIZE 1000
-#define BATCH_SIZE 8
+#define BATCH_SIZE 32
 #define EPOCHS 10
 #define LEARNING_RATE 0.01
 

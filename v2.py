@@ -159,12 +159,12 @@ if __name__ == "__main__":
     # Use random seed for natural variance (no fixed seed)
     
     input_size = 784  # 28x28 pixels
-    hidden_size = 256
+    hidden_size = 1024
     output_size = 10  # 10 digits
     
     model = NeuralNetwork(input_size, hidden_size, output_size)
     
-    batch_size = 8
+    batch_size = 32
     epochs = 10
     learning_rate = 0.01
     
